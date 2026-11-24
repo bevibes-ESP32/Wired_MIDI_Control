@@ -230,21 +230,26 @@ public:
     {
         char valueText[32];
         const ControlSpec* spec = findByCc(cc);
+        printMidiPrefix("[Rx]", cc);
         if (spec == nullptr)
         {
-            Serial.printf("[Rx] CC %u %u \"UNMAPPED\" \"%u\"\n", cc, value, value);
+            Serial.printf(" CC %u %u \"UNMAPPED\" \"%u\"\n", cc, value, value);
+            Serial.print("\033[0m");
             return;
         }
 
         formatValue(*spec, value, valueText, sizeof(valueText));
         char nameText[32];
         const char* name = formatName(*spec, value, nameText, sizeof(nameText));
-        Serial.printf("[Rx] CC %u %u \"%s\" \"%s\"\n", cc, value, name, valueText);
+        Serial.printf(" CC %u %u \"%s\" \"%s\"\n", cc, value, name, valueText);
+        Serial.print("\033[0m");
     }
 
     void onProgramChange(uint8_t, uint8_t program)
     {
-        Serial.printf("[Rx] PC %u preset %u\n", program, program + 1);
+        printMidiPrefix("[Rx]", 0);
+        Serial.printf(" PC %u preset %u\n", program, program + 1);
+        Serial.print("\033[0m");
     }
 
 private:
@@ -328,6 +333,29 @@ private:
         {
             return nullptr;
         }
+
+        struct Shortcut
+        {
+            const char* alias;
+            uint8_t cc;
+        };
+        static const Shortcut shortcuts[] =
+        {
+            {"delay", 2}, {"delaypos", 1},
+            {"comp", 18}, {"comppos", 22},
+            {"mod", 32}, {"modpos", 31},
+            {"reverb", 75}, {"reverbpos", 84},
+            {"gate", 14}, {"gatepos", 13},
+            {"eqpos", 30}
+        };
+        for (size_t i = 0; i < sizeof(shortcuts) / sizeof(shortcuts[0]); ++i)
+        {
+            if (strcmp(shortcuts[i].alias, normalized) == 0)
+            {
+                return findByCc(shortcuts[i].cc);
+            }
+        }
+
         for (size_t i = 0; i < sizeof(ControlSpecs) / sizeof(ControlSpecs[0]); ++i)
         {
             if ((ControlSpecs[i].alias[0] != '\0') && (strcmp(ControlSpecs[i].alias, normalized) == 0))
@@ -345,6 +373,47 @@ private:
         return normalize(token, normalizedToken, sizeof(normalizedToken)) &&
                normalize(command, normalizedCommand, sizeof(normalizedCommand)) &&
                strcmp(normalizedToken, normalizedCommand) == 0;
+    }
+
+    static const char* effectColor(uint8_t cc)
+    {
+        if ((cc >= 1 && cc <= 8) || (cc >= 91 && cc <= 95))
+        {
+            return "\033[38;5;208m";
+        }
+        if (cc >= 13 && cc <= 17)
+        {
+            return "\033[38;5;220m";
+        }
+        if (cc >= 18 && cc <= 22)
+        {
+            return "\033[38;5;135m";
+        }
+        if (cc >= 23 && cc <= 30)
+        {
+            return "\033[38;5;42m";
+        }
+        if (cc >= 31 && cc <= 56)
+        {
+            return "\033[38;5;39m";
+        }
+        if (cc >= 59 && cc <= 85)
+        {
+            return "\033[34m";
+        }
+        return nullptr;
+    }
+
+    static void printMidiPrefix(const char* direction, uint8_t cc)
+    {
+        Serial.print((strcmp(direction, "[Tx]") == 0) ? "\033[32m" : "\033[36m");
+        Serial.print(direction);
+        Serial.print("\033[0m");
+        const char* color = effectColor(cc);
+        if (color != nullptr)
+        {
+            Serial.print(color);
+        }
     }
 
     static const char* formatName(const ControlSpec& spec, uint8_t value, char* output, size_t size)
@@ -516,18 +585,23 @@ private:
         formatValue(*spec, value, valueText, sizeof(valueText));
         char nameText[32];
         const char* name = formatName(*spec, value, nameText, sizeof(nameText));
-        Serial.printf("[Tx] CC %u %u \"%s\" \"%s\"\n", cc, value, name, valueText);
+        printMidiPrefix("[Tx]", cc);
+        Serial.printf(" CC %u %u \"%s\" \"%s\"\n", cc, value, name, valueText);
+        Serial.print("\033[0m");
     }
 
     void transmitPc(uint8_t program)
     {
         sendPc_(1, program);
-        Serial.printf("[Tx] PC %u preset %u\n", program, program + 1);
+        printMidiPrefix("[Tx]", 0);
+        Serial.printf(" PC %u preset %u\n", program, program + 1);
+        Serial.print("\033[0m");
     }
 
     void transmitAlias(const ControlSpec& spec, float requested)
     {
-        if ((requested < spec.minimum) || (requested > spec.maximum))
+        const bool toggle = (spec.kind == VALUE_SWITCH) && spec.toggleOn64 && (requested == 64.0f);
+        if (!toggle && ((requested < spec.minimum) || (requested > spec.maximum)))
         {
             Serial.printf("[Error] %s range is %.4g..%.4g. Use HELP PARAMS.\n",
                           spec.name, spec.minimum, spec.maximum);
@@ -544,13 +618,21 @@ private:
         }
         else if (spec.kind == VALUE_SWITCH)
         {
-            if ((requested != 0.0f) && (requested != 1.0f))
+            if (toggle)
+            {
+                midiValue = 64;
+                actualValue = requested;
+            }
+            else if ((requested != 0.0f) && (requested != 1.0f))
             {
                 Serial.printf("[Error] %s accepts only 0 or 1. Use HELP PARAMS.\n", spec.name);
                 return;
             }
-            midiValue = (requested == 0.0f) ? 0 : spec.onValue;
-            actualValue = requested;
+            else
+            {
+                midiValue = (requested == 0.0f) ? 0 : spec.onValue;
+                actualValue = requested;
+            }
         }
         else if (spec.kind == VALUE_SELECT)
         {
@@ -571,8 +653,17 @@ private:
 
         sendCc_(1, spec.cc, midiValue);
         char actualText[24];
-        formatNumber(actualValue, actualText, sizeof(actualText));
-        Serial.printf("[Tx] CC %u %u \"%s\" %s\n", spec.cc, midiValue, spec.name, actualText);
+        if (toggle)
+        {
+            snprintf(actualText, sizeof(actualText), "toggle");
+        }
+        else
+        {
+            formatNumber(actualValue, actualText, sizeof(actualText));
+        }
+        printMidiPrefix("[Tx]", spec.cc);
+        Serial.printf(" CC %u %u \"%s\" %s\n", spec.cc, midiValue, spec.name, actualText);
+        Serial.print("\033[0m");
     }
 
     void printHelp()
@@ -585,6 +676,8 @@ private:
         Serial.println("  bank + | bank -       CC105 bank up/down");
         Serial.println("  slotbank + | slotbank -  A/B slot bank up/down");
         Serial.println("  <alias> <value>       value uses ToneXController parameter units");
+        Serial.println("  delay on|off|toggle   comp on|off|toggle");
+        Serial.println("  mod pre|post          BPM 90");
         Serial.println("  tap tempo | preset up | preset down");
         Serial.println("  HELP PARAMS           list aliases and accepted ranges");
     }
@@ -610,6 +703,7 @@ private:
         Serial.println("  preset slot               CC 105 values 2..13 (slots 1..12)");
         Serial.println("  bank + / bank -          CC 105 values 1 / 0");
         Serial.println("  slotbank + / slotbank -  CC 90 / 89");
+        Serial.println("Short aliases: delay, comp, mod, reverb, gate; modpos, delaypos...");
     }
 
     void executeLine(char* line)
@@ -739,13 +833,6 @@ private:
             return;
         }
 
-        float requested;
-        if (!parseFloat(tokens[count - 1], requested))
-        {
-            Serial.println("[Error] Expected a numeric parameter value. Use HELP PARAMS.");
-            return;
-        }
-
         char alias[48] = {0};
         size_t used = 0;
         for (size_t i = 0; i + 1 < count; ++i)
@@ -767,6 +854,32 @@ private:
         {
             Serial.printf("[Error] Unknown parameter alias \"%s\". Use HELP PARAMS.\n", alias);
             return;
+        }
+
+        float requested;
+        if (!parseFloat(tokens[count - 1], requested))
+        {
+            if (isCommand(alias, "mod") &&
+                (isCommand(tokens[count - 1], "pre") || isCommand(tokens[count - 1], "post")))
+            {
+                spec = findByCc(31);
+                requested = isCommand(tokens[count - 1], "post") ? 1.0f : 0.0f;
+            }
+            else if (spec->kind == VALUE_SWITCH &&
+                     (isCommand(tokens[count - 1], "on") || isCommand(tokens[count - 1], "off")))
+            {
+                requested = isCommand(tokens[count - 1], "on") ? 1.0f : 0.0f;
+            }
+            else if (spec->kind == VALUE_SWITCH && isCommand(tokens[count - 1], "toggle") &&
+                     spec->toggleOn64)
+            {
+                requested = 64.0f;
+            }
+            else
+            {
+                Serial.println("[Error] Expected a numeric value or a valid switch state. Use HELP PARAMS.");
+                return;
+            }
         }
         transmitAlias(*spec, requested);
     }
